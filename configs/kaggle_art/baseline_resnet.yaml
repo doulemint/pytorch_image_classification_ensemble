@@ -3,7 +3,7 @@ lr: 0.00001
 lr_scheduler: cosine_change_per_epoch
 optim: adam
 wd: 1e-06
-bs: 16
+bs: 8
 input_size: (512, 512)
 
 sampler: RandomSampler

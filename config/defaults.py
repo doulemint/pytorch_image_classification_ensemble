@@ -1,5 +1,5 @@
 from yacs.config import CfgNode as CN
-
+import os
 
 _C = CN()
 
@@ -15,7 +15,7 @@ _C.start_epoch = 0
 
 _C.dataset = "/data/nextcloud/dbc2017/files/images"
 _C.dataset_merge_csv = "/data/nextcloud/dbc2017/files/images/train"
-_C.num_classes = len(os.listdir(os.path.join(dataset, 'train')))
+# _C.num_classes = len(os.listdir(os.path.join(_C.dataset, 'train')))
 _C.submit_example =  "./submit_example.csv"
 _C.checkpoints = "./checkpoints/"        # path to save checkpoints
 _C.log_dir = "./logs/"                   # path to save log files
@@ -39,11 +39,11 @@ _C.epochs = 13
 _C.step_gamma = 0.1
 
 _C.bs = 32         # clw note: bs=128, 配合input_size=784, workers = 12，容易超出共享内存大小  报错：ERROR: Unexpected bus error encountered in worker. This might be caused by insufficient shared memory (shm).
-_C.input_size = (512, 512) if "vit" not in model_name else (384, 384)   # clw note：注意是 w, h   512、384、784、(800, 600)
+_C.input_size = (512, 512) if "vit" not in _C.model_name else (384, 384)   # clw note：注意是 w, h   512、384、784、(800, 600)
 
 _C.freeze_bn_epochs = 0
 _C.accum_iter = 1
-_C.drop_out_rate = 0.2 if "efficientnet" in model_name else 0.0
+_C.drop_out_rate = 0.2 if "efficientnet" in _C.model_name else 0.0
     #drop_out_rate = 0.0
 _C.loss_func = "TaylorCrossEntropyLoss" #  "LabelSmoothingLoss"、 "LabelSmoothingLoss_clw", "CELoss"、"BCELoss"、"FocalLoss"、“FocalLoss_clw”、 "TaylorCrossEntropyLoss",
                                      # "SymmetricCrossEntropy", "BiTemperedLogisticLoss"
@@ -59,6 +59,8 @@ _C.lr_scheduler = "cosine_change_per_epoch"  # lr scheduler method: "step", "cos
         #lr = 1e-4  # adam: 1e-4, 3e-4, 5e-4
 _C.lr = 1e-4
 _C.epochs = 10
+
+_C.use_kfold = False
                 
 def get_default_config():
   """Get a yacs CfgNode object with default values for my_project."""

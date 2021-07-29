@@ -10,7 +10,9 @@ from torch.optim import lr_scheduler
 import torch.utils.data
 import torch.utils.data.distributed
 import numpy as np
-from config import configs
+# from config import configs
+# from .config import get_default_config
+from config.defaults import get_default_config
 
 from models.model import get_model
 from utils.misc import get_files, accuracy_onehot,accuracy, AverageMeter, get_lr, adjust_learning_rate, save_checkpoint, get_optimizer
@@ -42,19 +44,20 @@ do_cutmix_prob = 0.0
 
 
 # for train fp16
-if configs.fp16:
-    try:
+
+try:
         from torch.cuda import amp
         # import apex
         # from apex.parallel import DistributedDataParallel as DDP
         # from apex.fp16_utils import *
         # from apex import amp, optimizers
         # from apex.multi_tensor_apply import multi_tensor_applier
-    except ImportError:
+except ImportError:
         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
 
 warnings.filterwarnings("ignore")
-os.environ['CUDA_VISIBLE_DEVICES'] = configs.gpu_id
+# if configs.gpu_id is not None:
+#     os.environ['CUDA_VISIBLE_DEVICES'] = configs.gpu_id
 
 # set random seed
 def seed_everything(seed):
@@ -65,17 +68,17 @@ def seed_everything(seed):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True   # 可以大幅提升se_resnext系列的训练速度,50系列从15min提升到5min;但是不能复现结果了;
-seed_everything(configs.seed)
+
 
 # make dir for use
-def makdir():
+def makdir(configs):
     if not os.path.exists(configs.checkpoints):
         os.makedirs(configs.checkpoints)
     if not os.path.exists(configs.log_dir):
         os.makedirs(configs.log_dir)
     if not os.path.exists(configs.submits):
         os.makedirs(configs.submits)
-makdir()
+
 
 
 # python train.py --model_name efficientnet-b3 --epochs 20 --step_milestones [7, 12, 17]
@@ -91,6 +94,9 @@ makdir()
 # python train.py --model_name se_resnext50_32x4d
 
 def main():
+
+    configs = get_default_config()
+
     parser = argparse.ArgumentParser(description="PyTorch Template Training")
     parser.add_argument("--model_name", default=configs.model_name, help="", type=str)
     parser.add_argument('--config', type=str)
@@ -103,6 +109,16 @@ def main():
 
     # 0.加载配置信息,启动日志记录
     # 如果用shell传入参数,则修改config
+    
+    if args.config is not None:
+        print("merge from: ",args.config)
+        configs.merge_from_file(args.config)
+
+    if configs.gpu_id is not None:
+        os.environ['CUDA_VISIBLE_DEVICES'] = configs.gpu_id
+
+    # configs.merge_from_list(args.config)
+
     configs.input_size = (512, 512) if "vit" not in args.model_name else (384, 384)
     configs.model_name = args.model_name
     configs.epochs = args.epochs
@@ -110,11 +126,10 @@ def main():
     configs.step_gamma = args.step_gamma
     configs.accum_iter = args.accum_iter
     configs.step_milestones = args.step_milestones
-
-    # config = get_default_config()
-    # if args.config is not None:
-    #     config.merge_from_file(args.config)
-    # config.merge_from_list(args.options)
+    configs.num_classes = len(os.listdir(os.path.join(configs.dataset, 'train')))
+   
+    seed_everything(configs.seed)
+    makdir(configs)
 
     logger = Logger(os.path.join(configs.log_dir, '%s_%s_log.txt' % (configs.model_name, time.strftime("%Y_%m_%d_%H_%M_%S", time.localtime()))), title=configs.model_name, resume=configs.resume)
     logger.info(str(configs))
@@ -129,9 +144,9 @@ def main():
 
     # 1.加载数据集,设置采样方法
     train_data_df = get_files(configs.dataset+"/train/",   "train")  # DataFrame: ( image_nums, 2 )
-    train_dataset = CassavaTrainingDataset(train_data_df, "train")
+    train_dataset = CassavaTrainingDataset(train_data_df,configs, "train")
     val_data_df = get_files(configs.dataset+"/val/",   "val")
-    val_dataset = CassavaTrainingDataset(val_data_df, "val")
+    val_dataset = CassavaTrainingDataset(val_data_df,configs, "val")
 
 
     if configs.sampler == "WeightedSampler":          # TODO：解决类别不平衡问题：根据不同类别样本数量给予不同的权重
@@ -166,9 +181,12 @@ def main():
                                              drop_last=False)
 
     # 2.加载模型, 设置优化器,学习率调整策略
-    model = get_model()
-    model.cuda()
-    optimizer = get_optimizer(model)
+    model = get_model(configs)
+    if configs.gpu_id is not None:
+        model.cuda()
+    else:
+        model.to('cpu')
+    optimizer = get_optimizer(model,configs)
 
     if configs.lr_scheduler == "step":
         # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(configs.epochs*0.3), gamma=0.1)   # clw note: 注意调用step_size这么多次学习率开始变化，如果每个epoch结束后执行scheduler.step(),那么就设置成比如epochs*0.3;
@@ -227,7 +245,7 @@ def main():
     elif configs.loss_func == "FocalLoss_clw":  # clw modify
         criterion = FocalLoss_clw()
     else:
-        raise Exception("No this loss type, please check config.py !!!")
+        raise Exception("No this loss type, please check config.yaml !!!")
 
 
     ###################################################
@@ -243,7 +261,7 @@ def main():
             freeze_batchnorm_stats(model)
         # val_loss, val_acc, test_5 = validate(val_loader, model, criterion, epoch)
         #train_loss, train_acc, train_5 = train(train_loader, model, criterion, optimizer, epoch)
-        train_loss, train_acc, train_5 = train(train_loader, model, criterion, optimizer, epoch, scheduler=scheduler if configs.lr_scheduler == "cosine_change_per_batch" else None) # clw modify: 暂时默认cosine按mini-batch调整学习率
+        train_loss, train_acc, train_5 = train(train_loader, model, criterion, optimizer, epoch,configs,scheduler=scheduler if configs.lr_scheduler == "cosine_change_per_batch" else None) # clw modify: 暂时默认cosine按mini-batch调整学习率
 
 
         if configs.evaluate:
@@ -272,7 +290,7 @@ def main():
                 'acc': val_acc,
                 'best_acc': best_acc,
                 #'optimizer': optimizer.state_dict(),   # TODO, 可以不保存优化器
-            }, is_best)
+            }, is_best,configs)
             print('Best acc:')
             print(best_acc)
         else:
@@ -281,7 +299,7 @@ def main():
                 'state_dict': model.state_dict(),
                 'train_acc': train_acc
                 #'optimizer': optimizer.state_dict(),   # TODO, 可以不保存优化器
-            }, False)
+            }, False,configs)
 
         if configs.lr_scheduler == "step":
             scheduler.step()
@@ -292,7 +310,7 @@ def main():
 
 
 
-def train(train_loader, model, criterion, optimizer, epoch, scheduler=None):
+def train(train_loader, model, criterion, optimizer, epoch, configs, scheduler=None):
     # switch to train mode
     model.train()
 
@@ -304,7 +322,7 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler=None):
     end = time.time()
 
     batch_nums = len(train_loader)  # clw add
-    criterion2 = LabelSmoothingLoss_clw(label_smoothing=0, class_nums=configs.num_classes)
+    criterion2 = LabelSmoothingLoss_clw(label_smoothing=0.1, class_nums=configs.num_classes)
 
     if configs.fp16:
         scaler = amp.GradScaler()
@@ -314,7 +332,8 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler=None):
 
         # measure data loading time
         data_time.update(time.time() - end)
-        inputs, targets = inputs.cuda(), targets.cuda()
+        if configs.gpu_id is not None:
+            inputs, targets = inputs.cuda(), targets.cuda()
         # compute output
         # feature_1:(bs, 256, 1/4, 1/4)  feature_2:(bs, 512, 1/8, 1/8)    feature_3: (bs, 1024, 1/16, 1/16)   feature_3: (bs, 2048, 1/32, 1/32)
         #feature_1, feature_2, feature_3, feature_4, outputs = model(inputs)  # clw note: inputs: (32, 3, 224, 224)  # 在这里可以把所有stage的feature map返回，便于下面可视化；
@@ -323,7 +342,7 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler=None):
         if np.random.rand(1) < configs.do_cutmix_in_batch:
             # generate mixed sample
             lam = np.random.beta(1.0, 1.0)
-            rand_index = torch.randperm(inputs.size()[0]).cuda()
+            rand_index = torch.randperm(inputs.size()[0]).cuda() if configs.gpu_id is not None else torch.randperm(inputs.size()[0])
             target_a = targets
             target_b = targets[rand_index]
             bbx1, bby1, bbx2, bby2 = rand_bbox(inputs.size(), lam)
@@ -339,8 +358,11 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler=None):
         else:
             # compute output
             with amp.autocast():
-                outputs = model(inputs)
+                outputs = model(inputs.float())
+                # _, target_max_index = targets.max(1)
+                # targets = target_max_index
                 loss = criterion(outputs, targets)
+        
 
 
 
@@ -356,6 +378,8 @@ def train(train_loader, model, criterion, optimizer, epoch, scheduler=None):
         prec1 = accuracy_onehot(outputs.data, targets.data, topk=(1,))[0]  # clw note: 这里计算acc； 如果只有两个类，此时top5会报错;
         losses.update(loss.item(), inputs.size(0))
         top1.update(prec1.item(), inputs.size(0))
+
+        # print("loss: ",loss.cpu().detach().numpy(),"prec1: ",prec1.cpu().detach().numpy())
 
         # compute gradient and do SGD step
 
