@@ -1,0 +1,63 @@
+device: cuda
+dataset:
+  type: dir
+  name: ImageNet
+  dataset_dir: '/data/nextcloud/dbc2017/files/images/'
+  image_size: 224
+  n_channels: 3
+  n_classes: 50
+model:
+  type: imagenet
+  name: efficientnet-b5
+  pretrain: True
+  pretrain_pth: None
+augmentation:
+  use_albumentations: True
+  use_random_crop: False
+  use_random_horizontal_flip: True
+  use_cutout: False
+  use_random_erasing: False
+  use_dual_cutout: False
+  use_mixup: False
+  mixup:
+    alpha: 1.0
+  use_ricap: False
+  use_cutmix: False
+  cutmix:
+    alpha: 1.0
+  use_step_crop: True
+  use_soft_target: True
+  use_label_smoothing: False
+  use_focal_loss: False
+tta:
+  use_resize: True
+  use_center_crop: True
+  resize: 256
+scheduler:
+  type: 'CosineAnnealing'
+  lr_min_factor: 1e-6
+  epochs: 10
+  T0: 10
+train:
+  output_dir: experiments/imagenet/efficientnet-b5/exp02_adamatch
+  use_apex: False
+  batch_size: 32
+  seed: 123
+  use_kfold: False
+  fold_num: 5
+  base_lr: 3e-4
+  weight_decay: 1e-6
+  optimizer: 'admw'
+  dataloader:
+    num_workers: 2
+validation:
+  batch_size: 32
+  dataloader:
+    num_workers: 2
+test:
+  batch_size: 32
+  dataloader:
+    pin_memory: False
+    num_workers: 2
+  checkpoint: 'experiments/imagenet/efficientnet-b5/exp02_adamatch/'
+  output_dir: 'outputs/imagenet/efficientnet-b5/exp02_adamatch'

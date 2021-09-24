@@ -1,0 +1,51 @@
+dataset:
+  type: dir
+  name: ImageNet
+  dataset_dir: '/content/images/'
+  image_size: 384
+  n_channels: 3
+  n_classes: 50
+model:
+  type: imagenet
+  name: vit_large_r50_s32_384
+  pretrain: True
+  pretrain_pth: None
+  vit:
+    load_checkpoint: 'R50_L_32-i21k-300ep-lr_0.001-aug_medium1-wd_0.1-do_0.1-sd_0.1--imagenet2012-steps_20k-lr_0.01-res_384'
+augmentation:
+  use_albumentations: False
+  use_random_crop: True
+  use_random_horizontal_flip: True
+  use_cutout: False
+  use_random_erasing: False
+  use_dual_cutout: False
+  use_mixup: False
+  use_ricap: False
+  use_cutmix: False
+  use_label_smoothing: False
+tta:
+  use_resize: True
+  use_center_crop: True
+  resize: 418
+scheduler:
+  type: 'CosineAnnealing'
+  lr_min_factor: 1e-6
+  epochs: 20
+  T0: 10
+train:
+  output_dir: experiments/imagenet/vit_large_r50_s32_384/exp00
+  use_apex: False
+  batch_size: 8
+  seed: 123
+  use_kfold: Flase
+  fold_num: 1
+  base_lr: 3e-4
+  weight_decay: 1e-6
+  optimizer: 'admw'
+  dataloader:
+    num_workers: 8
+validation:
+  batch_size: 8
+  dataloader:
+    num_workers: 8
+

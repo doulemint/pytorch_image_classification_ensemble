@@ -1,6 +1,11 @@
-pretrainedmodels>=0.7.4
-timm>=0.4.12
-progress>=1.5
-albumentations>=1.0.3
-warmup_scheduler>=0.3.2
-torch>=1.6
+numpy
+torch>=1.4.0
+torchvision
+fvcore
+tqdm
+yacs
+git+https://github.com/NVIDIA/apex.git@02a33875970e1b555754dfc4ab85d05595d23764#egg=apex
+termcolor
+timm
+pretrainedmodels
+thop==0.0.31.post2001170342

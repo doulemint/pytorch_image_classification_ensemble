@@ -1,210 +1,161 @@
-# clw note: 根据验证集结果 和 真实标签，用于对验证集的结果进行分析
+#!/usr/bin/env python
 
-import os
-from torchvision import models
+import argparse
+import pathlib
 import time
-import torch
-from utils.misc import AverageMeter, accuracy, get_files
-from progress.bar import Bar
-from utils.reader import CassavaValDataset
-from config import configs
-import torchvision.transforms as transforms
-from tqdm import tqdm
+
 import numpy as np
-import matplotlib.pyplot as plt
-import pretrainedmodels
-import torch.nn as nn
-import timm
-from torch.utils.data.sampler import *
-from models import get_model_no_pretrained
+import torch
 import torch.nn.functional as F
-import random
+import tqdm
+import pandas as pd
 
-# set random seed
-def seed_everything(seed):
-    random.seed(seed)
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.backends.cudnn.deterministic = True
-seed_everything(42)
+from fvcore.common.checkpoint import Checkpointer
+from torch.utils.data import DataLoader
+from sklearn.model_selection import StratifiedKFold,StratifiedShuffleSplit
 
-# 绘制混淆矩阵  参考：https://www.jianshu.com/p/cd59aed787cf?open_source=weibo_search
-def plot_confusion_matrix(cm, classes, title=None, cmap=plt.cm.Reds):  # plt.cm.Blues
-    '''
-    cm - 混淆矩阵的数值， 是一个二维numpy数组
-    classes - 各个类别的标签（label）
-    title - 图片标题
-    cmap - 颜色图
-    '''
-    plt.rc('font', family='Times New Roman', size='8')  # 设置字体样式、大小
-
-    # 按行进行归一化
-    cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
-
-    print("Normalized confusion matrix")
-    print(cm)
-    # str_cm = cm.astype(np.str).tolist()
-    # for row in str_cm:
-    #     print('\t'.join(row))
-
-    # 占比1%以下的单元格，设为0，防止在最后的颜色中体现出来
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            if int(cm[i, j] * 100 + 0.5) == 0:
-                cm[i, j] = 0
-
-    fig, ax = plt.subplots()
-    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
-    ax.figure.colorbar(im, ax=ax) # 侧边的颜色条带
-
-    ax.set(xticks=np.arange(cm.shape[1]),
-           yticks=np.arange(cm.shape[0]),
-           xticklabels=classes, yticklabels=classes,
-           title=title,
-           ylabel='True label',
-           xlabel='Predicted')
-
-    # 通过绘制格网，模拟每个单元格的边框
-    ax.set_xticks(np.arange(cm.shape[1] + 1) - .5, minor=True)
-    ax.set_yticks(np.arange(cm.shape[0] + 1) - .5, minor=True)
-    ax.grid(which="minor", color="gray", linestyle='-', linewidth=0.2)
-    ax.tick_params(which="minor", bottom=False, left=False)
-
-    # 将x轴上的lables旋转45度
-    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
-             rotation_mode="anchor")
-
-    # 标注百分比信息
-    fmt = 'd'
-    thresh = cm.max() / 2.
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            if int(cm[i, j] * 100 + 0.5) > 0:
-                ax.text(j, i, format(int(cm[i, j] * 100 + 0.5), fmt) + '%',
-                        ha="center", va="center",
-                        color="white" if cm[i, j] > thresh else "black")
-    fig.tight_layout()
-    #plt.savefig('cm.jpg', dpi=300)
-    plt.show()
+from pytorch_image_classification import (
+    apply_data_parallel_wrapper,
+    create_dataloader,create_dataset,
+    create_loss,create_transform,
+    create_model,get_files,
+    get_default_config,
+    update_config,
+)
+from pytorch_image_classification.utils import (
+    AverageMeter,
+    create_logger,
+    get_rank,
+)
+from pytorch_image_classification.datasets import MyDataset
 
 
-def validate_and_analysis(val_loader, model):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    top1 = AverageMeter()
-    #top5 = AverageMeter()
+def load_config():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, required=True)
+    parser.add_argument('options', default=None, nargs=argparse.REMAINDER)
+    args = parser.parse_args()
 
-    # switch to evaluate mode
+    config = get_default_config()
+    config.merge_from_file(args.config)
+    config.merge_from_list(args.options)
+    update_config(config)
+    config.freeze()
+    return config
+
+
+def evaluate(config, model, test_loader, loss_func, logger):
+    device = torch.device(config.device)
+
     model.eval()
 
-    label_predict_matrix = np.zeros((configs.num_classes, configs.num_classes))  # clw note: 创建混淆矩阵，用于统计比如predict类别1但是预测成了类别4;
-    batch_nums = len(val_loader)  # clw add
-    end = time.time()
-    bar = Bar('Validating: ', max=len(val_loader))
+    loss_meter = AverageMeter()
+    correct_meter = AverageMeter()
+    start = time.time()
+
+    pred_raw_all = []
+    pred_prob_all = []
+    pred_label_all = []
+    gt_label_all = []
     with torch.no_grad():
-        for batch_idx, (inputs, targets) in enumerate(tqdm(val_loader)):
-            # measure data loading time
-            data_time.update(time.time() - end)
-            inputs, targets = inputs.cuda(), targets.cuda()  # .half()
+        for data, targets in tqdm.tqdm(test_loader):
+            data = data.to(device)
+            gt_label_all.extend(targets)
+            targets = targets.to(device)
 
-            # img0_tensor = img_tensor[:, :, :, :384]
-            # img1_tensor = img_tensor[:, :, :, 384:768]
-            # img2_tensor = img_tensor[:, :, :, 768:1152]
-            # img3_tensor = img_tensor[:, :, :, 1152:1536]
-            # img4_tensor = img_tensor[:, :, :, 1536:1920]
-            # img0_tensor = inputs[:, :, :, :512]
-            # img1_tensor = inputs[:, :, :, 512:1024]
-            # img2_tensor = inputs[:, :, :, 1024:1536]
-            # img3_tensor = inputs[:, :, :, 1536:2048]
-            # img4_tensor = inputs[:, :, :, 2048:2560]
+            outputs = model(data)
+            loss = loss_func(outputs, targets)
 
-            img0_tensor = inputs
+            pred_raw_all.append(outputs.cpu().numpy())
+            pred_prob_all.append(F.softmax(outputs, dim=1).cpu().numpy())
 
+            _, preds = torch.max(outputs, dim=1)
+            pred_label_all.append(preds.cpu().numpy())
 
-            p = []
-            ####
-            logit = model(img0_tensor)              #feature_1, feature_2, feature_3, feature_4, outputs = model(inputs)  # clw modify
-            p.append(F.softmax(logit, -1))
-            # logit = model(img1_tensor)
-            # p.append(F.softmax(logit, -1))
-            # logit = model(img2_tensor)
-            # p.append(F.softmax(logit, -1))
-            # logit = model(img3_tensor)
-            # p.append(F.softmax(logit, -1))
-            # logit = model(img4_tensor)
-            # p.append(F.softmax(logit, -1))
-            ####
+            loss_ = loss.item()
+            correct_ = preds.eq(targets).sum().item()
+            num = data.size(0)
 
-            p = torch.stack(p).mean(0)
+            loss_meter.update(loss_, num)
+            correct_meter.update(correct_, 1)
 
-            predict_class_ids = torch.argmax(p, dim=1).cpu().numpy()
-            true_label_class_ids = torch.argmax(targets.data, dim=1).cpu().numpy()
-            for i in range( inputs.shape[0] ):
-                label_predict_matrix[ true_label_class_ids[i] ][ predict_class_ids[i] ] += 1
+        accuracy = correct_meter.sum / len(test_loader.dataset)
 
-            # measure accuracy and record loss
-            #prec1 = accuracy(outputs.data, targets.data, topk=(1,))[0]
-            prec1 = accuracy(p, targets.data, topk=(1,))[0]
-            top1.update(prec1.item(), inputs.size(0))
-            #top5.update(prec5.item(), inputs.size(0))
+        elapsed = time.time() - start
+        logger.info(f'Elapsed {elapsed:.2f}')
+        logger.info(f'Loss {loss_meter.avg:.4f} Accuracy {accuracy:.4f}')
 
-            # measure elapsed time
-            batch_time.update(time.time() - end)
-            end = time.time()
-
-            # plot progress
-            bar.suffix  = '({batch}/{size}) Data: {data:.3f}s | Batch: {bt:.3f}s | Total: {total:} | ETA: {eta:} | top1: {top1: .4f} '.format(
-                        batch=batch_idx + 1,
-                        size=len(val_loader),
-                        data=data_time.avg,
-                        bt=batch_time.avg,
-                        total=bar.elapsed_td,
-                        eta=bar.eta_td,
-                        top1=top1.avg,
-                        )
-            bar.next()
-
-    bar.finish()
-    #return (losses.avg, top1.avg, top5.avg)
-    return (label_predict_matrix, top1.avg, 1)
+    preds = np.concatenate(pred_raw_all)
+    probs = np.concatenate(pred_prob_all)
+    labels = np.concatenate(pred_label_all)
+    return preds, probs, labels, loss_meter.avg, accuracy,gt_label_all
 
 
-if __name__ == "__main__":
+def main():
+    config = load_config()
 
-    #model_file_name = 'efficientnet-b3_2021_01_11_16_03_30-checkpoint.pth.tar'
-    #model_file_name = 'efficientnet-b3_2021_01_12_00_06_11-best_model.pth.tar'
-    #model_file_name = 'efficientnet-b3_2021_01_30_22_17_34-best_model.pth.tar'
-    #model_file_name = 'efficientnet-b3_2021_01_30_22_17_34-checkpoint.pth.tar'
-    #model_file_name = 'efficientnet-b3_2021_01_31_21_53_10-best_model.pth.tar'
-    #model_file_name = 'efficientnet-b3_2021_02_02_20_02_13-best_model.pth.tar'
-    model_file_name = 'efficientnet-b3_2021_02_02_20_02_13-checkpoint.pth.tar'
-
-    if "ckpt" in model_file_name:  # from train_holychen.py
-        model_root_path = '/home/user/pytorch_classification'
-        state_dict = torch.load(os.path.join(model_root_path, model_file_name))
-        my_state_dict = {}
-        for k, v in state_dict.items():
-            my_state_dict[k[6:]] = v
+    if config.test.output_dir is None:
+        output_dir = pathlib.Path(config.test.checkpoint).parent
     else:
-        model_root_path = '/home/user/pytorch_classification/checkpoints'
-        my_state_dict = torch.load(os.path.join(model_root_path, model_file_name))['state_dict']
+        output_dir = pathlib.Path(config.test.output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
 
-    model = get_model_no_pretrained(model_file_name, my_state_dict)
-    model.cuda()
+    logger = create_logger(name=__name__, distributed_rank=get_rank())
+
+    model = create_model(config)
+    model = apply_data_parallel_wrapper(config, model)
+    checkpointer = Checkpointer(model)#,checkpoint_dir=output_dir,
+                                # logger=logger,
+                                # distributed_rank=get_rank()
+    checkpointer.load(config.test.checkpoint)
+    if config.augmentation.use_albumentations:
+            if config.dataset.type=='dir':
+                test_clean = get_files(config.dataset.dataset_dir+'val/','train',output_dir/'label_map.pkl')
+                test_dataset = MyDataset(test_clean,config.dataset.dataset_dir+'val/',
+                        transforms=create_transform(config, is_train=False),is_df=config.dataset.type=='df')
+                train_clean = get_files(config.dataset.dataset_dir+'train/','train',output_dir/'label_map.pkl')
+                train_dataset = MyDataset(train_clean,config.dataset.dataset_dir+'train/',
+                        transforms=create_transform(config, is_train=False),is_df=config.dataset.type=='df')
+                test_loader = DataLoader(test_dataset, batch_size=config.train.batch_size, num_workers=config.train.dataloader.num_workers)
+                labeled_dataloader = DataLoader(train_dataset, batch_size=config.train.batch_size, num_workers=config.train.dataloader.num_workers)
+
+            else: 
+                data_root = config.dataset.dataset_dir
+                batch_size=config.train.batch_size
+                num_workers = 2
+                train_dataset, val_dataset = create_dataset(config, True)
+                labeled_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers)
+
+                # test_dataset = MyDataset(test_clean, data_root, transforms=create_transform(config, is_train=False),data_type=config.dataset.subname)
+                test_loader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers)
+    else:
+      labeled_dataloader,test_loader = create_dataloader(config, is_train=True)
+    _, test_loss = create_loss(config)
+
+    preds, probs, labels, loss, acc,gt = evaluate(config, model, test_loader,
+                                               test_loss, logger)
+
+    output_path = output_dir / f'predictions_test.npz'
+    np.savez(output_path,
+             preds=preds,
+             probs=probs,
+             labels=labels,
+             loss=loss,
+             acc=acc,
+             gt=gt)
+
+    preds, probs, labels, loss, acc,gt = evaluate(config, model, labeled_dataloader,
+                                               test_loss, logger)
+
+    output_path = output_dir / f'predictions_train.npz'
+    np.savez(output_path,
+             preds=preds,
+             probs=probs,
+             labels=labels,
+             loss=loss,
+             acc=acc,
+             gt=gt)
 
 
-    val_files = get_files(configs.dataset + "/val/", "val")
-    val_dataset = CassavaValDataset(val_files)
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=32, shuffle=False, sampler=SequentialSampler(val_dataset),
-        num_workers=configs.workers, pin_memory=True
-    )
-
-    # 绘制混淆矩阵并打印acc
-    label_predict_matrix, val_acc, _ = validate_and_analysis(val_loader, model)
-    print('Test Acc: %.6f' % val_acc)
-    plot_confusion_matrix(label_predict_matrix, [i for i in range(configs.num_classes)])
-
-
+if __name__ == '__main__':
+    main()
